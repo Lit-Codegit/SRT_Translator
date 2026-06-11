@@ -1,0 +1,17 @@
+node_modules/
+out/
+output/
+data/
+
+.env
+.env.*
+*.log
+
+dist/
+release/
+
+.DS_Store
+Thumbs.db
+
+# Personal prompt presets should be reviewed before publishing.
+预设参考.json
