@@ -43,6 +43,7 @@ const api = {
     ipcRenderer.invoke('config:paths'),
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:select-output-dir'),
   selectFiles: (): Promise<StoredFile[]> => ipcRenderer.invoke('files:select'),
+  selectSrtFolder: (): Promise<StoredFile[]> => ipcRenderer.invoke('files:select-folder'),
   selectPreset: (): Promise<StoredFile | null> => ipcRenderer.invoke('preset:select'),
   saveOutput: (request: SaveOutputRequest): Promise<string> => ipcRenderer.invoke('output:save', request),
   getHistory: (): Promise<unknown> => ipcRenderer.invoke('history:get'),

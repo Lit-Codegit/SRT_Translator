@@ -226,6 +226,11 @@ export function App(): JSX.Element {
     if (files.length) setStagedFiles(files)
   }
 
+  async function chooseSrtFolder(): Promise<void> {
+    const files = await window.translator.selectSrtFolder()
+    if (files.length) setStagedFiles(files)
+  }
+
   async function importPreset(): Promise<void> {
     const file = await window.translator.selectPreset()
     if (!file) return
@@ -743,9 +748,14 @@ export function App(): JSX.Element {
             </div>
           )}
           <div className="composer">
-            <button className="icon-button large" onClick={chooseFiles} title="批量导入文件">
-              <FilePlus2 size={20} />
-            </button>
+            <div className="composer-tools">
+              <button className="icon-button large" onClick={chooseFiles} title="批量导入文件">
+                <FilePlus2 size={20} />
+              </button>
+              <button className="icon-button large" onClick={chooseSrtFolder} title="递归导入文件夹内所有 SRT">
+                <FolderOpen size={20} />
+              </button>
+            </div>
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
