@@ -3,7 +3,7 @@ import type { BrowserWindow as ElectronBrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { testApi, listModels } from './apiProxy'
-import { saveOutput, selectPresetFile, selectSrtFolder, selectTextFiles } from './fileManager'
+import { loadSrtSources, saveOutput, selectPresetFile, selectSrtFolder, selectSrtSources, selectTextFiles } from './fileManager'
 import { GenerationQueue } from './taskQueue'
 import { configPath, defaultConfig, ensureStorage, historyPath, loadConfig, readJsonFile, saveConfig, writeJsonFile } from './storage'
 import type { ApiConfig, GenerationRequest, SaveOutputRequest } from './types'
@@ -74,7 +74,9 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('files:select', async () => selectTextFiles())
+  ipcMain.handle('files:select-srt-sources', async () => selectSrtSources())
   ipcMain.handle('files:select-folder', async () => selectSrtFolder())
+  ipcMain.handle('files:load-srt-sources', async (_event, paths: string[]) => loadSrtSources(paths))
   ipcMain.handle('preset:select', async () => selectPresetFile())
   ipcMain.handle('output:save', async (_event, request: SaveOutputRequest) => saveOutput(request))
 

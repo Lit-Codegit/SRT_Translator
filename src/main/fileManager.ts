@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, relative, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { defaultOutputDir } from './storage'
@@ -10,10 +10,10 @@ const { dialog } = electron
 
 export async function selectTextFiles(): Promise<StoredFile[]> {
   const result = await dialog.showOpenDialog({
-    title: '选择要翻译的文件',
+    title: '选择 SRT 文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Text files', extensions: ['srt', 'txt', 'md', 'ass', 'vtt', 'json'] },
+      { name: 'SRT subtitles', extensions: ['srt'] },
       { name: 'All files', extensions: ['*'] }
     ]
   })
@@ -27,6 +27,20 @@ export async function selectTextFiles(): Promise<StoredFile[]> {
       content: await readFile(filePath, 'utf8')
     }))
   )
+}
+
+export async function selectSrtSources(): Promise<StoredFile[]> {
+  const result = await dialog.showOpenDialog({
+    title: '导入 SRT 或字幕文件夹',
+    properties: ['openFile', 'openDirectory', 'multiSelections'],
+    filters: [
+      { name: 'SRT subtitles', extensions: ['srt'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  })
+
+  if (result.canceled) return []
+  return loadSrtSources(result.filePaths)
 }
 
 export async function selectSrtFolder(): Promise<StoredFile[]> {
@@ -50,6 +64,25 @@ export async function selectSrtFolder(): Promise<StoredFile[]> {
   )
 }
 
+export async function loadSrtSources(paths: string[]): Promise<StoredFile[]> {
+  const nestedFiles = await Promise.all(paths.map((sourcePath) => loadSrtSource(sourcePath)))
+  return nestedFiles
+    .flat()
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
+async function loadSrtSource(sourcePath: string): Promise<StoredFile[]> {
+  const sourceStat = await stat(sourcePath)
+  if (sourceStat.isDirectory()) {
+    const filePaths = await findSrtFiles(sourcePath)
+    filePaths.sort((left, right) => left.localeCompare(right))
+    return Promise.all(filePaths.map((filePath) => readStoredFile(filePath, relative(sourcePath, filePath))))
+  }
+
+  if (sourceStat.isFile() && isSrtFile(sourcePath)) return [await readStoredFile(sourcePath)]
+  return []
+}
+
 async function findSrtFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
   const nestedFiles = await Promise.all(
@@ -61,6 +94,18 @@ async function findSrtFiles(directory: string): Promise<string[]> {
     })
   )
   return nestedFiles.flat()
+}
+
+function isSrtFile(filePath: string): boolean {
+  return extname(filePath).toLocaleLowerCase() === '.srt'
+}
+
+async function readStoredFile(filePath: string, name = basename(filePath)): Promise<StoredFile> {
+  return {
+    name,
+    path: filePath,
+    content: await readFile(filePath, 'utf8')
+  }
 }
 
 export async function selectPresetFile(): Promise<StoredFile | null> {

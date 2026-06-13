@@ -34,8 +34,8 @@ type AppStore = {
   setHistory: (history: HistoryState) => void
   setDraft: (draft: string) => void
   setStagedFiles: (files: ImportedFile[]) => void
-  createGroupWithSessions: (instruction: string, files: ImportedFile[]) => ChatSession[]
-  createEmptyGroup: () => void
+  createGroupWithSessions: (instruction: string, files: ImportedFile[], settings?: GroupSettings) => ChatSession[]
+  createEmptyGroup: (settings?: GroupSettings) => void
   addUserMessage: (sessionId: string, content: string) => void
   addFilesToGroup: (groupId: string, instruction: string, files: ImportedFile[]) => ChatSession[]
   deleteSession: (sessionId: string) => void
@@ -90,7 +90,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setHistory: (history) => set({ history }),
   setDraft: (draft) => set({ draft }),
   setStagedFiles: (stagedFiles) => set({ stagedFiles }),
-  createGroupWithSessions: (instruction, files) => {
+  createGroupWithSessions: (instruction, files, settings) => {
     const now = Date.now()
     const groupId = createId('group')
     const inputs = files.length > 0 ? files : []
@@ -104,7 +104,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       title: `${new Date(now).toLocaleString()} ${sessions.length > 1 ? '批量翻译' : '翻译'}`,
       createdAt: now,
       sessionIds: sessions.map((session) => session.id),
-      expanded: true
+      expanded: true,
+      settings
     }
 
     set((state) => ({
@@ -124,7 +125,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     return sessions
   },
-  createEmptyGroup: () => {
+  createEmptyGroup: (settings) => {
     const now = Date.now()
     const groupId = createId('group')
     const session = makeSession(groupId, '', undefined, now)
@@ -134,7 +135,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       title: `${new Date(now).toLocaleString()} 新任务`,
       createdAt: now,
       sessionIds: [session.id],
-      expanded: true
+      expanded: true,
+      settings
     }
 
     set((state) => ({

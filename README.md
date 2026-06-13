@@ -1,5 +1,7 @@
 # SRT Translator
 
+这是私用版本，公共版本发布在github上，在本地的/home/ritsuko/Documents/SRT_Translator_public中，同步前需要脱敏。
+
 SRT Translator 是一个基于 Electron 的本地字幕翻译工具，通过 OpenAI 兼容 API 批量翻译和校验 SRT 字幕。
 
 ## 主要功能

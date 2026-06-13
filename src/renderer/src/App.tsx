@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import {
   CheckCircle2,
   ChevronDown,
@@ -7,7 +8,6 @@ import {
   ChevronUp,
   Clipboard,
   Download,
-  FilePlus2,
   FolderOpen,
   History,
   KeyRound,
@@ -34,7 +34,7 @@ import { validateSrt } from './lib/srt'
 import { createId } from './lib/id'
 import { parseThinking } from './lib/thinking'
 import { emptyHistory, useAppStore } from './stores/appStore'
-import type { ApiConfig, ChatSession, GroupSettings, Message, PromptItem, SessionGroup } from './types'
+import type { ApiConfig, ChatSession, GroupSettings, ImportedFile, Message, PromptItem, SessionGroup } from './types'
 
 type RunSettings = {
   mode: GroupSettings['mode']
@@ -42,6 +42,29 @@ type RunSettings = {
   concurrency: number
   outputDir: string
   systemPrompt: string
+}
+
+type FileSystemEntryLike = {
+  name: string
+  isFile: boolean
+  isDirectory: boolean
+}
+
+type FileSystemFileEntryLike = FileSystemEntryLike & {
+  file: (success: (file: File) => void, error?: (error: DOMException) => void) => void
+}
+
+type FileSystemDirectoryEntryLike = FileSystemEntryLike & {
+  createReader: () => {
+    readEntries: (
+      success: (entries: FileSystemEntryLike[]) => void,
+      error?: (error: DOMException) => void
+    ) => void
+  }
+}
+
+type DataTransferItemWithEntry = DataTransferItem & {
+  webkitGetAsEntry?: () => FileSystemEntryLike | null
 }
 
 export function App(): JSX.Element {
@@ -101,6 +124,8 @@ export function App(): JSX.Element {
   })
   const [expandedSection, setExpandedSection] = useState<'settings' | 'history'>('settings')
   const [settingsGroupId, setSettingsGroupId] = useState<string | null>(null)
+  const [composerDragActive, setComposerDragActive] = useState(false)
+  const [importNotice, setImportNotice] = useState('')
 
   const activeSession = history.activeSessionId ? history.sessions[history.activeSessionId] : undefined
   const activeGroup = activeSession
@@ -115,6 +140,9 @@ export function App(): JSX.Element {
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
   const runSettingsRef = useRef(new Map<string, RunSettings>())
+  const autoValidationRetryRef = useRef(new Map<string, number>())
+  const composerDragDepthRef = useRef(0)
+  const importNoticeTimerRef = useRef<number | null>(null)
 
   // Determine model list for current baseUrl
   const currentModels = config?.modelsCache?.[config?.baseUrl ?? ''] ?? []
@@ -171,6 +199,12 @@ export function App(): JSX.Element {
   }, [activeSession?.messages.length, activeSession?.messages.at(-1)?.content])
 
   useEffect(() => {
+    return () => {
+      if (importNoticeTimerRef.current) window.clearTimeout(importNoticeTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
     stickToBottomRef.current = true
     requestAnimationFrame(() => messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight }))
   }, [activeSession?.id])
@@ -184,6 +218,27 @@ export function App(): JSX.Element {
   async function handleSetCustomSystemPrompt(value: string): Promise<void> {
     setCustomSystemPrompt(value)
     if (config) await persistConfig({ ...config, customSystemPrompt: value })
+  }
+
+  function defaultGroupSettings(currentConfig: ApiConfig): GroupSettings {
+    return {
+      mode: currentConfig.defaultGroupMode ?? 'conversation'
+    }
+  }
+
+  function handleCreateEmptyGroup(): void {
+    if (!config) return
+    createEmptyGroup(defaultGroupSettings(config))
+  }
+
+  function toggleActiveGroupMode(): void {
+    if (!activeGroup) return
+    const currentMode = activeGroup.settings?.mode ?? 'conversation'
+    const nextMode: GroupSettings['mode'] = currentMode === 'autoSrt' ? 'conversation' : 'autoSrt'
+    updateGroupSettings(activeGroup.id, {
+      ...activeGroup.settings,
+      mode: nextMode
+    })
   }
 
   async function handleBaseUrlChange(newUrl: string): Promise<void> {
@@ -221,14 +276,223 @@ export function App(): JSX.Element {
     })
   }
 
-  async function chooseFiles(): Promise<void> {
+  function stageImportedFiles(files: ImportedFile[]): void {
+    if (!files.length) return
+    const merged = new Map(stagedFiles.map((file) => [file.path || file.name, file]))
+    files.forEach((file) => merged.set(file.path || file.name, file))
+    setStagedFiles([...merged.values()])
+  }
+
+  function showImportNotice(message: string): void {
+    setImportNotice(message)
+    if (importNoticeTimerRef.current) window.clearTimeout(importNoticeTimerRef.current)
+    importNoticeTimerRef.current = window.setTimeout(() => {
+      setImportNotice('')
+      importNoticeTimerRef.current = null
+    }, 2400)
+  }
+
+  async function chooseSrtSources(): Promise<void> {
     const files = await window.translator.selectFiles()
-    if (files.length) setStagedFiles(files)
+    const srtFiles = files.filter((file) => isSrtName(file.name))
+    stageImportedFiles(srtFiles)
+    if (srtFiles.length) showImportNotice(`已导入 ${srtFiles.length} 个 SRT`)
   }
 
   async function chooseSrtFolder(): Promise<void> {
     const files = await window.translator.selectSrtFolder()
-    if (files.length) setStagedFiles(files)
+    stageImportedFiles(files)
+    if (files.length) showImportNotice(`已导入 ${files.length} 个 SRT`)
+  }
+
+  function removeStagedFile(fileKey: string): void {
+    setStagedFiles(stagedFiles.filter((file) => (file.path || file.name) !== fileKey))
+  }
+
+  function hasDraggedSources(dataTransfer: DataTransfer): boolean {
+    return Array.from(dataTransfer.types).some((type) => {
+      const normalizedType = type.toLocaleLowerCase()
+      return normalizedType === 'file' || normalizedType === 'files' || normalizedType.startsWith('text/') || normalizedType.includes('uri-list')
+    })
+  }
+
+  function handleComposerDragEnter(event: React.DragEvent<HTMLDivElement>): void {
+    if (!hasDraggedSources(event.dataTransfer)) return
+    event.preventDefault()
+    composerDragDepthRef.current += 1
+    setComposerDragActive(true)
+  }
+
+  function handleComposerDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    if (!hasDraggedSources(event.dataTransfer)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    setComposerDragActive(true)
+  }
+
+  function handleComposerDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    if (!hasDraggedSources(event.dataTransfer)) return
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1)
+    if (composerDragDepthRef.current === 0) setComposerDragActive(false)
+  }
+
+  async function handleComposerDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    if (!hasDraggedSources(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    composerDragDepthRef.current = 0
+    setComposerDragActive(false)
+
+    try {
+      const paths = await getDroppedSourcePaths(event.dataTransfer)
+      const pathFiles = paths.length ? await window.translator.loadSrtSources(paths) : []
+      const browserFiles = pathFiles.length ? [] : await getDroppedSourceFiles(event.dataTransfer)
+      const files = [...pathFiles, ...browserFiles]
+      if (!files.length) {
+        const types = Array.from(event.dataTransfer.types).join(', ') || '空'
+        showImportNotice(`没有找到可导入的 .srt · ${types}`)
+        return
+      }
+      stageImportedFiles(files)
+      showImportNotice(`已导入 ${files.length} 个 SRT`)
+    } catch (error) {
+      showImportNotice(`导入失败：${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  async function getDroppedSourcePaths(dataTransfer: DataTransfer): Promise<string[]> {
+    const droppedFiles = [
+      ...Array.from(dataTransfer.files),
+      ...Array.from(dataTransfer.items).flatMap((item) => {
+        if (item.kind !== 'file') return []
+        const file = item.getAsFile()
+        return file ? [file] : []
+      })
+    ]
+    const filePaths = droppedFiles.flatMap((file) => {
+      try {
+        const path = window.translator.getPathForFile(file)
+        return path ? [path] : []
+      } catch {
+        return []
+      }
+    })
+    const typeValues = Array.from(dataTransfer.types).flatMap((type) => getDroppedText(dataTransfer, type))
+    const itemValues = await Promise.all(
+      Array.from(dataTransfer.items)
+        .filter((item) => item.kind === 'string')
+        .map((item) => readDroppedItemText(item))
+    )
+    const textPaths = [...typeValues, ...itemValues].flatMap((value) => parseDroppedText(value))
+    return Array.from(new Set([...filePaths, ...textPaths]))
+  }
+
+  async function getDroppedSourceFiles(dataTransfer: DataTransfer): Promise<ImportedFile[]> {
+    const entryFiles = await getDroppedEntryFiles(dataTransfer)
+    if (entryFiles.length) return entryFiles
+
+    const droppedFiles = [
+      ...Array.from(dataTransfer.files),
+      ...Array.from(dataTransfer.items).flatMap((item) => {
+        if (item.kind !== 'file') return []
+        const file = item.getAsFile()
+        return file ? [file] : []
+      })
+    ]
+    const uniqueFiles = new Map(droppedFiles.map((file) => [`${file.name}:${file.size}:${file.lastModified}`, file]))
+    const imported = await Promise.all(
+      [...uniqueFiles.values()]
+        .filter((file) => isSrtName(file.name))
+        .map((file) => readDroppedFile(file, file.name))
+    )
+    return imported
+  }
+
+  async function getDroppedEntryFiles(dataTransfer: DataTransfer): Promise<ImportedFile[]> {
+    const entries = Array.from(dataTransfer.items).flatMap((item) => {
+      if (item.kind !== 'file') return []
+      const entry = (item as DataTransferItemWithEntry).webkitGetAsEntry?.()
+      return entry ? [entry] : []
+    })
+    const nestedFiles = await Promise.all(entries.map((entry) => readDroppedEntry(entry)))
+    return nestedFiles.flat()
+  }
+
+  async function readDroppedEntry(entry: FileSystemEntryLike, parentPath = ''): Promise<ImportedFile[]> {
+    const entryPath = parentPath ? `${parentPath}/${entry.name}` : entry.name
+    if (entry.isFile) {
+      if (!isSrtName(entry.name)) return []
+      const file = await readEntryFile(entry as FileSystemFileEntryLike)
+      return [await readDroppedFile(file, entryPath)]
+    }
+    if (!entry.isDirectory) return []
+
+    const children = await readDirectoryEntries(entry as FileSystemDirectoryEntryLike)
+    const nestedFiles = await Promise.all(children.map((child) => readDroppedEntry(child, entryPath)))
+    return nestedFiles.flat()
+  }
+
+  function readEntryFile(entry: FileSystemFileEntryLike): Promise<File> {
+    return new Promise((resolve, reject) => entry.file(resolve, reject))
+  }
+
+  async function readDirectoryEntries(entry: FileSystemDirectoryEntryLike): Promise<FileSystemEntryLike[]> {
+    const reader = entry.createReader()
+    const entries: FileSystemEntryLike[] = []
+    while (true) {
+      const batch = await new Promise<FileSystemEntryLike[]>((resolve, reject) => {
+        reader.readEntries(resolve, reject)
+      })
+      if (!batch.length) return entries
+      entries.push(...batch)
+    }
+  }
+
+  async function readDroppedFile(file: File, name: string): Promise<ImportedFile> {
+    return {
+      name,
+      path: name,
+      content: await file.text()
+    }
+  }
+
+  function isSrtName(name: string): boolean {
+    return name.toLocaleLowerCase().endsWith('.srt')
+  }
+
+  function getDroppedText(dataTransfer: DataTransfer, type: string): string[] {
+    try {
+      const value = dataTransfer.getData(type)
+      return value ? [value] : []
+    } catch {
+      return []
+    }
+  }
+
+  function readDroppedItemText(item: DataTransferItem): Promise<string> {
+    return new Promise((resolve) => {
+      try {
+        item.getAsString((value) => resolve(value || ''))
+      } catch {
+        resolve('')
+      }
+    })
+  }
+
+  function parseDroppedText(value: string): string[] {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
+      .flatMap((line) => {
+        if (line.startsWith('/')) return [line]
+        try {
+          const url = new URL(line)
+          return url.protocol === 'file:' ? [decodeURIComponent(url.pathname)] : []
+        } catch {
+          return []
+        }
+      })
   }
 
   async function importPreset(): Promise<void> {
@@ -261,7 +525,7 @@ export function App(): JSX.Element {
           await startGeneration(session)
         }
       } else {
-        const newSessions = createGroupWithSessions(instruction, files)
+        const newSessions = createGroupWithSessions(instruction, files, defaultGroupSettings(config))
         for (const session of newSessions) {
           await startGeneration(session)
         }
@@ -269,6 +533,7 @@ export function App(): JSX.Element {
     } else if (activeSession) {
       // Continue existing conversation with multi-turn context
       const prevMessages = activeSession.messages
+      autoValidationRetryRef.current.delete(activeSession.id)
       addUserMessage(activeSession.id, instruction)
       updateSessionStatus(activeSession.id, 'queued')
       const runSettings = resolveRunSettings(activeSession.groupId, config, history.groups)
@@ -291,15 +556,22 @@ export function App(): JSX.Element {
       })
     } else {
       // Fresh start — create new group with one session
-      const newSessions = createGroupWithSessions(instruction, [])
+      const newSessions = createGroupWithSessions(instruction, [], defaultGroupSettings(config))
       for (const session of newSessions) {
         await startGeneration(session)
       }
     }
   }
 
+  function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    if (canSend) void sendCurrentDraft()
+  }
+
   async function startGeneration(session: ChatSession): Promise<void> {
     if (!config) return
+    autoValidationRetryRef.current.delete(session.id)
     updateSessionStatus(session.id, 'queued')
     const runSettings = resolveRunSettings(session.groupId, config, useAppStore.getState().history.groups)
     const msgs = buildMessages({
@@ -323,6 +595,7 @@ export function App(): JSX.Element {
 
   async function regenerate(session: ChatSession, messageId: string): Promise<void> {
     if (!config) return
+    autoValidationRetryRef.current.delete(session.id)
     rollbackToMessage(session.id, messageId)
     const state = useAppStore.getState()
     const rolledBack = state.history.sessions[session.id]
@@ -387,9 +660,12 @@ export function App(): JSX.Element {
     const validation = validateSrt(parsed.body, session.sourceText)
     setMessageValidation(sessionId, message.id, validation)
     if (!validation.ok) {
+      const retryStarted = await retryAfterValidationFailure(session, message, validation.summary, currentConfig, state.history.groups)
+      if (retryStarted) return
       updateSessionStatus(sessionId, 'error', `自动校验失败：${validation.summary}`)
       return
     }
+    autoValidationRetryRef.current.delete(sessionId)
 
     updateSessionStatus(sessionId, 'downloading')
     try {
@@ -403,6 +679,48 @@ export function App(): JSX.Element {
     } catch (error) {
       updateSessionStatus(sessionId, 'error', `自动下载失败：${error instanceof Error ? error.message : '未知错误'}`)
     }
+  }
+
+  async function retryAfterValidationFailure(
+    session: ChatSession,
+    message: Message,
+    summary: string,
+    currentConfig: ApiConfig,
+    groups: SessionGroup[]
+  ): Promise<boolean> {
+    const maxRetries = Math.max(0, Math.floor(currentConfig.autoValidationRetryCount ?? 0))
+    const currentRetry = autoValidationRetryRef.current.get(session.id) ?? 0
+    if (currentRetry >= maxRetries) {
+      autoValidationRetryRef.current.delete(session.id)
+      return false
+    }
+
+    autoValidationRetryRef.current.set(session.id, currentRetry + 1)
+    rollbackToMessage(session.id, message.id)
+    const state = useAppStore.getState()
+    const rolledBack = state.history.sessions[session.id]
+    if (!rolledBack) return false
+
+    updateSessionStatus(session.id, 'queued', `自动校验失败，正在重试 ${currentRetry + 1}/${maxRetries}：${summary}`)
+    const runSettings = resolveRunSettings(session.groupId, currentConfig, groups)
+    const retryRequestId = createId('req')
+    const msgs = buildMessages({
+      preset,
+      customSystemPrompt: runSettings.systemPrompt,
+      instruction: session.instruction,
+      fileName: session.fileName,
+      sourceText: session.sourceText,
+      existingMessages: rolledBack.messages.length > 0 ? rolledBack.messages : undefined
+    })
+    runSettingsRef.current.set(retryRequestId, runSettings)
+    await window.translator.startGeneration({
+      requestId: retryRequestId,
+      sessionId: session.id,
+      groupId: session.groupId,
+      config: { ...currentConfig, model: runSettings.model, concurrency: runSettings.concurrency },
+      messages: msgs
+    })
+    return true
   }
 
   const statusCounts = useMemo(() => {
@@ -555,6 +873,37 @@ export function App(): JSX.Element {
                         </button>
                       </div>
                     </Field>
+                    <Field label="新建任务默认模式">
+                      <div className="global-mode-toggle">
+                        <button
+                          type="button"
+                          className={(config.defaultGroupMode ?? 'conversation') === 'conversation' ? 'selected' : ''}
+                          onClick={() => persistConfig({ ...config, defaultGroupMode: 'conversation' })}
+                        >
+                          对话模式
+                        </button>
+                        <button
+                          type="button"
+                          className={config.defaultGroupMode === 'autoSrt' ? 'selected' : ''}
+                          onClick={() => persistConfig({ ...config, defaultGroupMode: 'autoSrt' })}
+                        >
+                          自动字幕
+                        </button>
+                      </div>
+                    </Field>
+                    <Field label="自动字幕校验失败重试次数">
+                      <input
+                        type="number"
+                        min={0}
+                        value={config.autoValidationRetryCount ?? 0}
+                        onChange={(event) =>
+                          persistConfig({
+                            ...config,
+                            autoValidationRetryCount: Math.max(0, Math.floor(Number(event.target.value) || 0))
+                          })
+                        }
+                      />
+                    </Field>
                   </div>
 
                   {/* 预设与提示词 */}
@@ -564,10 +913,9 @@ export function App(): JSX.Element {
                       <Upload size={15} />
                       导入预设 JSON
                     </button>
-                    <textarea
-                      className="system-prompt"
+                    <SystemPromptEditor
                       value={customSystemPrompt}
-                      onChange={(event) => handleSetCustomSystemPrompt(event.target.value)}
+                      onSave={handleSetCustomSystemPrompt}
                     />
                     <div className="prompt-list">
                       {preset ? (
@@ -673,16 +1021,29 @@ export function App(): JSX.Element {
         <header className="chat-header">
           <div>
             <div className="chat-title">
-              {activeGroup ? `${activeGroup.title} · ` : ''}{activeSession?.title || '新翻译'}
-              {activeGroup?.settings?.mode === 'autoSrt' && <span className="mode-badge">自动字幕</span>}
+              <span className="chat-title-text">
+                {activeGroup ? `${activeGroup.title} · ` : ''}{activeSession?.title || '新翻译'}
+              </span>
             </div>
             <div className="chat-subtitle">
               {statusSummary || ' '}
             </div>
           </div>
-          <button className="icon-button" onClick={createEmptyGroup} title="新建对话">
-            <Plus size={20} />
-          </button>
+          <div className="chat-header-actions">
+            {activeGroup && (
+              <button
+                type="button"
+                className={`mode-badge ${activeGroup.settings?.mode === 'autoSrt' ? 'auto' : 'conversation'}`}
+                onClick={toggleActiveGroupMode}
+                title="点击切换当前任务模式"
+              >
+                {activeGroup.settings?.mode === 'autoSrt' ? '自动字幕' : '对话模式'}
+              </button>
+            )}
+            <button className="icon-button" onClick={handleCreateEmptyGroup} title="新建任务">
+              <Plus size={20} />
+            </button>
+          </div>
         </header>
 
         <div
@@ -738,8 +1099,16 @@ export function App(): JSX.Element {
           {stagedFiles.length > 0 && (
             <div className="file-strip">
               {stagedFiles.map((file) => (
-                <span className="file-chip" key={file.path || file.name}>
-                  {file.name}
+                <span className="file-chip" key={file.path || file.name} title={file.name}>
+                  <span>{file.name}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${file.name}`}
+                    title="移除"
+                    onClick={() => removeStagedFile(file.path || file.name)}
+                  >
+                    <XCircle size={12} />
+                  </button>
                 </span>
               ))}
               <button className="link-button" onClick={() => setStagedFiles([])}>
@@ -747,10 +1116,23 @@ export function App(): JSX.Element {
               </button>
             </div>
           )}
-          <div className="composer">
+          {importNotice && <div className="import-notice">{importNotice}</div>}
+          <div
+            className={`composer ${composerDragActive ? 'drag-active' : ''}`}
+            onDragEnter={handleComposerDragEnter}
+            onDragOver={handleComposerDragOver}
+            onDragLeave={handleComposerDragLeave}
+            onDrop={handleComposerDrop}
+          >
+            {composerDragActive && (
+              <div className="composer-drop-hint">
+                <Upload size={18} />
+                松开导入 SRT 或文件夹
+              </div>
+            )}
             <div className="composer-tools">
-              <button className="icon-button large" onClick={chooseFiles} title="批量导入文件">
-                <FilePlus2 size={20} />
+              <button className="icon-button large" onClick={chooseSrtSources} title="导入 SRT 文件">
+                <Upload size={20} />
               </button>
               <button className="icon-button large" onClick={chooseSrtFolder} title="递归导入文件夹内所有 SRT">
                 <FolderOpen size={20} />
@@ -759,6 +1141,7 @@ export function App(): JSX.Element {
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               placeholder={activeGroup?.settings?.mode === 'autoSrt' ? '输入翻译要求，回复完成后将自动校验并下载…' : '输入消息或翻译要求…'}
             />
             {isGenerating ? (
@@ -819,6 +1202,187 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
+function SystemPromptEditor({
+  value,
+  onSave
+}: {
+  value: string
+  onSave: (value: string) => void | Promise<void>
+}): JSX.Element {
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const editorRef = useRef<HTMLElement | null>(null)
+  const previewCloseTimerRef = useRef<number | null>(null)
+  const [previewPosition, setPreviewPosition] = useState<CSSProperties | null>(null)
+  const [editorPosition, setEditorPosition] = useState<CSSProperties | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value)
+  const [saving, setSaving] = useState(false)
+  const trimmedValue = value.trim()
+  const previewText = trimmedValue || '尚未设置自定义系统提示词。点击此区域即可添加。'
+
+  useEffect(() => {
+    if (!editing) setDraft(value)
+  }, [editing, value])
+
+  useEffect(() => {
+    return () => {
+      if (previewCloseTimerRef.current) window.clearTimeout(previewCloseTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!editing) return
+
+    function closeOnOutsideClick(event: MouseEvent): void {
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || editorRef.current?.contains(target)) return
+      setEditing(false)
+    }
+
+    function closeOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setEditing(false)
+    }
+
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [editing])
+
+  function cancelPreviewClose(): void {
+    if (previewCloseTimerRef.current) {
+      window.clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = null
+    }
+  }
+
+  function schedulePreviewClose(): void {
+    cancelPreviewClose()
+    previewCloseTimerRef.current = window.setTimeout(() => {
+      setPreviewPosition(null)
+      previewCloseTimerRef.current = null
+    }, 120)
+  }
+
+  function openPreview(clientX: number, clientY: number): void {
+    if (editing) return
+    cancelPreviewClose()
+    if (previewPosition) return
+    const width = Math.min(560, window.innerWidth - 24)
+    const height = Math.min(440, window.innerHeight - 24)
+    setPreviewPosition({
+      left: Math.max(12, Math.min(clientX + 14, window.innerWidth - width - 12)),
+      top: Math.max(12, Math.min(clientY + 14, window.innerHeight - height - 12)),
+      width,
+      maxHeight: height
+    })
+  }
+
+  function openEditor(): void {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    const width = Math.min(760, window.innerWidth - 24)
+    const height = Math.min(640, window.innerHeight - 24)
+    const preferredLeft = rect ? rect.right + 14 : 12
+    const preferredTop = rect ? rect.top - 24 : 12
+    setDraft(value)
+    setPreviewPosition(null)
+    setEditorPosition({
+      left: Math.max(12, Math.min(preferredLeft, window.innerWidth - width - 12)),
+      top: Math.max(12, Math.min(preferredTop, window.innerHeight - height - 12)),
+      width,
+      height
+    })
+    setEditing(true)
+  }
+
+  async function saveDraft(): Promise<void> {
+    setSaving(true)
+    try {
+      await onSave(draft)
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="system-prompt-editor">
+      <button
+        type="button"
+        ref={triggerRef}
+        className={`system-prompt-trigger ${trimmedValue ? 'has-content' : ''}`}
+        onMouseEnter={(event) => openPreview(event.clientX, event.clientY)}
+        onMouseLeave={schedulePreviewClose}
+        onClick={openEditor}
+      >
+        <span>
+          <strong>自定义系统提示词</strong>
+          <small>{trimmedValue ? `${trimmedValue.length} 字 · 悬停预览，点击编辑` : '未设置 · 点击添加'}</small>
+        </span>
+        <span className="system-prompt-edit-hint">
+          <Pencil size={13} />
+          编辑
+        </span>
+      </button>
+
+      {previewPosition && (
+        <aside
+          className="prompt-preview-card system-prompt-preview-card"
+          style={previewPosition}
+          onMouseEnter={cancelPreviewClose}
+          onMouseLeave={schedulePreviewClose}
+        >
+          <header>
+            <div>
+              <strong>自定义系统提示词</strong>
+              <small>会追加在导入预设之后</small>
+            </div>
+            <div className="prompt-preview-tags">
+              <span>system</span>
+              <span className={trimmedValue ? 'enabled' : 'disabled'}>{trimmedValue ? '已设置' : '未设置'}</span>
+            </div>
+          </header>
+          <pre>{previewText}</pre>
+        </aside>
+      )}
+
+      {editing && editorPosition && (
+        <aside className="system-prompt-editor-card" ref={editorRef} style={editorPosition}>
+          <header>
+            <div>
+              <strong>编辑系统提示词</strong>
+              <small>这段内容会作为额外 system message 追加到预设提示词后。</small>
+            </div>
+            <button className="mini-icon" type="button" title="关闭" onClick={() => setEditing(false)}>
+              <XCircle size={14} />
+            </button>
+          </header>
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="输入希望所有对话默认遵循的系统提示词..."
+          />
+          <footer>
+            <span>{draft.trim().length} 字</span>
+            <div>
+              <button type="button" className="system-prompt-secondary" onClick={() => setEditing(false)}>
+                取消
+              </button>
+              <button type="button" className="system-prompt-save" disabled={saving} onClick={saveDraft}>
+                {saving ? <Loader2 className="spin" size={14} /> : <Save size={14} />}
+                保存
+              </button>
+            </div>
+          </footer>
+        </aside>
+      )}
+    </div>
+  )
+}
+
 function PromptPreviewItem({
   prompt,
   onEnabledChange
@@ -826,9 +1390,33 @@ function PromptPreviewItem({
   prompt: PromptItem
   onEnabledChange: (enabled: boolean) => void
 }): JSX.Element {
-  const [previewPosition, setPreviewPosition] = useState<{ left: number; top: number } | null>(null)
+  const previewCloseTimerRef = useRef<number | null>(null)
+  const [previewPosition, setPreviewPosition] = useState<CSSProperties | null>(null)
 
-  function positionPreview(clientX: number, clientY: number): void {
+  useEffect(() => {
+    return () => {
+      if (previewCloseTimerRef.current) window.clearTimeout(previewCloseTimerRef.current)
+    }
+  }, [])
+
+  function cancelPreviewClose(): void {
+    if (previewCloseTimerRef.current) {
+      window.clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = null
+    }
+  }
+
+  function schedulePreviewClose(): void {
+    cancelPreviewClose()
+    previewCloseTimerRef.current = window.setTimeout(() => {
+      setPreviewPosition(null)
+      previewCloseTimerRef.current = null
+    }, 120)
+  }
+
+  function openPreview(clientX: number, clientY: number): void {
+    cancelPreviewClose()
+    if (previewPosition) return
     const width = 420
     const height = 360
     setPreviewPosition({
@@ -840,9 +1428,8 @@ function PromptPreviewItem({
   return (
     <label
       className="prompt-item"
-      onMouseEnter={(event) => positionPreview(event.clientX, event.clientY)}
-      onMouseMove={(event) => positionPreview(event.clientX, event.clientY)}
-      onMouseLeave={() => setPreviewPosition(null)}
+      onMouseEnter={(event) => openPreview(event.clientX, event.clientY)}
+      onMouseLeave={schedulePreviewClose}
     >
       <input
         type="checkbox"
@@ -854,7 +1441,14 @@ function PromptPreviewItem({
         <small>{prompt.role}</small>
       </span>
       {previewPosition && (
-        <aside className="prompt-preview-card" style={previewPosition}>
+        <aside
+          className="prompt-preview-card"
+          style={previewPosition}
+          onMouseEnter={cancelPreviewClose}
+          onMouseLeave={schedulePreviewClose}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => event.preventDefault()}
+        >
           <header>
             <div>
               <strong>{prompt.name}</strong>

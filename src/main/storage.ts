@@ -19,6 +19,8 @@ export const defaultConfig: ApiConfig = {
   outputDir: defaultOutputDir,
   modelsQueryPath: 'models',
   modelsCache: {},
+  defaultGroupMode: 'conversation',
+  autoValidationRetryCount: 0,
   customSystemPrompt:
     '你是专业字幕与文本翻译助手。翻译 SRT 时必须保留序号、时间轴和空行结构，只翻译字幕文本，不添加解释。',
   preset: null

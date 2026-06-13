@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { ApiConfig, GenerationRequest, SaveOutputRequest, StoredFile } from '../main/types'
 
@@ -43,7 +43,10 @@ const api = {
     ipcRenderer.invoke('config:paths'),
   selectOutputDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:select-output-dir'),
   selectFiles: (): Promise<StoredFile[]> => ipcRenderer.invoke('files:select'),
+  selectSrtSources: (): Promise<StoredFile[]> => ipcRenderer.invoke('files:select-srt-sources'),
   selectSrtFolder: (): Promise<StoredFile[]> => ipcRenderer.invoke('files:select-folder'),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  loadSrtSources: (paths: string[]): Promise<StoredFile[]> => ipcRenderer.invoke('files:load-srt-sources', paths),
   selectPreset: (): Promise<StoredFile | null> => ipcRenderer.invoke('preset:select'),
   saveOutput: (request: SaveOutputRequest): Promise<string> => ipcRenderer.invoke('output:save', request),
   getHistory: (): Promise<unknown> => ipcRenderer.invoke('history:get'),

@@ -9,6 +9,8 @@ export type ApiConfig = {
   outputDir: string
   modelsQueryPath: string
   modelsCache: Record<string, string[]>
+  defaultGroupMode: 'conversation' | 'autoSrt'
+  autoValidationRetryCount: number
   customSystemPrompt: string
   preset: unknown
 }
